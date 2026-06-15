@@ -50,7 +50,7 @@ graph.add_node("divide-node", division)
 graph.add_edge(START, "router1")
 
 graph.add_conditional_edges(
-    "router1",
+    "router1", 
     decide_next_node1,
     {
         "addition-operation": "add-node",

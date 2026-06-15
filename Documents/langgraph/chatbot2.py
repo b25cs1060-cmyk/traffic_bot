@@ -37,6 +37,14 @@ while user_input != "exit":
     conversation_history = result["message"]       
     user_input = input("Enter: ")
 
+#we can store all of this conversation into a txt file
+with open("chat-history.txt" , "w") as file :
+    file.write("conversation began; \n")
 
-
+    for message in conversation_history:
+        if isinstance(message , HumanMessage):
+            file.write("You :{message.content}\n")
+        elif isinstance(message , AIMessage):
+            file.write("AI:{message.content}\n")
+    file.write("end of the conversation")
 
