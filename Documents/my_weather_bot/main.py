@@ -1,27 +1,23 @@
 import code
 import os
-from token import OP
-from turtle import end_fill 
 import requests
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import AIMessage
 from langchain_core.messages import SystemMessage,ToolMessage,BaseMessage
 from langchain_groq import ChatGroq
-from typing import Annoted,TypedDict,Dict,Sequence
+from typing import Annotated,TypedDict,Dict,Sequence
 from typing import Optional
-from langgraph.graph import StateGraph
+from langgraph.graph import StateGraph , START , END
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolNode
-from langgraph.graph.message import add_message
+from langgraph.graph.message import add_messages
 
 load_dotenv()
 
 API_KEY=os.getenv("GROQ_API_KEY")
 
-llm_model=ChatGroq(model="llama-3.3-70b-versatile" , api_key=API_KEY)
-
-weather_endpoint_url="https://api.openweathermap.org/data/4.0/onecall/timeline/15min"
+weather_endpoint_url="https://api.openweathermap.org/data/2.5/weather"
 geocoding_endpoint_url= "http://api.openweathermap.org/geo/1.0/direct"
 weather_agent_api=os.getenv("WEATHER_API_KEY")
 
@@ -39,7 +35,7 @@ event_api_key=os.getenv("EVENT_API_KEY")
 #fifteen minutes timeline
 
 @tool
-def get_weather_conditions(city_name :str , state_code: str , country_code : str) -> str:
+def get_weather_conditions(city_name :str , state_code: str , country_code : str) :
 
     """You are supposed to decode the geocode of the name of the city provided to you 
       using geocoding endpoint and then fetch the details of the weather data using the 
@@ -71,8 +67,12 @@ def get_weather_conditions(city_name :str , state_code: str , country_code : str
 
     weather_data=requests.get(weather_endpoint_url , params=params2)
     weather_data.raise_for_status()
-    weather_deta_json=weather_data.json()
-    stats=weather_deta_json["data"]
+    weather_data_json=weather_data.json()
+    stats=[weather_data_json["weather"],
+           weather_data_json["main"],
+           weather_data_json["wind"] ,
+               weather_data_json.get("rain", {}),
+           weather_data_json["clouds"]]
     #this will include all the alerts too
     return stats
 
@@ -127,27 +127,25 @@ def get_traffic_data(city_name: str, state_code: str, country_code: str):
 
 #event agent
 @tool
-def get_event_details( city: str,  start_date: Optional[str] = None, end_date: Optional[str] = None): 	
-
+def get_event_details(city: str, start_date: Optional[str] = None, end_date: Optional[str] = None):
     """You are supposed to find all the information related to the ongoing events in the city which has been passed as a parameter . 
        The user might additionally also enter the start date and the end date
        
-       Arguments = city """
-    
+       Arguments = city , start_date (optional, format YYYY-MM-DD) , end_date (optional, format YYYY-MM-DD)"""
+
     params = {
         "apikey": event_api_key,
-        "city": city
+        "city": city,
+        "size" :1
     }
 
     if start_date:
-        params["StartDateTime"] = start_date
-
+        params["startDateTime"] = f"{start_date}T00:00:00Z"
     if end_date:
-        params["EndDateTime"] = end_date
+        params["endDateTime"] = f"{end_date}T00:00:00Z"
 
     event_data = requests.get(event_url, params=params)
     event_data.raise_for_status()
-
     event_data_json = event_data.json()
 
     if "_embedded" not in event_data_json:
@@ -158,28 +156,28 @@ def get_event_details( city: str,  start_date: Optional[str] = None, end_date: O
 tool_list=[get_traffic_data,get_weather_conditions ,get_event_details]
 
 class AgentState(TypedDict):
-    messages :Annoted[Sequence[BaseMessage] , add_message]
+    messages :Annotated[Sequence[BaseMessage] , add_messages]
 
+#model
+llm_model=ChatGroq(model="llama-3.3-70b-versatile" , api_key=API_KEY ,  max_tokens=400).bind_tools(tool_list)
 
 #NODE
 def main_agent(state:AgentState) ->AgentState :
     system_prompt=SystemMessage(content="""
-    You are my AI agent whoes is responsible for predicting the traffic conditions of a city based various factors losted below :
-    - Traffic conditions of the city (use the get_traffic_data tool for the same)
-    - The weather conditions of the city which might affect the travelling of vehicles (use the get_weather_conditions tool for the same)
-    - The recent events going in the city which may lead to crowding and hinder vehicle movement (user the get_event_details) tool for the same
+You are a traffic prediction assistant.
+Use available traffic, weather, and event tools to gather data, predict traffic conditions, and explain the prediction.
 """)
     
     if not state["messages"] :
         user_input = "I am here to assist you determine the traffic conditions of the city you wish to"
-        user_message =HumanMessage(user_input.content)
+        user_message =HumanMessage(content=user_input)
     else :
         user_input ="How would you like to get the traffic data"
-        user_message=HumanMessage(user_input.content)
+        user_message=HumanMessage(content=user_input)
     
-    to_pass= [system_prompt] + [user_message] +[state["messages"]]
+    to_pass= [system_prompt] +list(state["messages"][-10:])
     response = llm_model.invoke(to_pass)
-    return response
+    return {"messages" : [response]}
 
 #ROUTER
 def shall_continue(state:AgentState)->AgentState:
@@ -192,4 +190,42 @@ def shall_continue(state:AgentState)->AgentState:
        return "continue"
     #go on with the loop
      
-    
+graph=StateGraph(AgentState)
+graph.add_node("main_agent" , main_agent)
+tools=ToolNode(tools=tool_list)
+graph.add_node("tools" , tools)
+graph.add_edge(START , "main_agent")
+graph.add_conditional_edges(
+    "main_agent" , #the source code
+    shall_continue , #the decider
+    {
+        "continue" : "tools" , 
+        "end" :END
+    }
+)
+graph.add_edge("tools" , "main_agent")
+my_traffic_bot =graph.compile()
+
+
+chat_history=[]
+user_input=input("Enter:  " )
+
+#in order to maintain all the history
+MAX_HISTORY = 2   # last 2 messages only
+
+while True:
+    user_input = input("You: ")
+
+    if user_input.lower() == "exit":
+        break
+
+    chat_history.append(HumanMessage(content=user_input))
+
+    recent_history = chat_history[-MAX_HISTORY:]
+
+    response = my_traffic_bot.invoke({"messages": recent_history})
+
+    ai_msg =response["messages"][-1]
+    print("\nBot:", ai_msg.content)
+
+    chat_history.append(ai_msg)
