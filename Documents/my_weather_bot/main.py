@@ -1,11 +1,12 @@
 import code
 import os
-from token import OP 
+from token import OP
+from turtle import end_fill 
 import requests
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import AIMessage
-from langchain_core.messages import SystemMessage,ToolMessage
+from langchain_core.messages import SystemMessage,ToolMessage,BaseMessage
 from langchain_groq import ChatGroq
 from typing import Annoted,TypedDict,Dict,Sequence
 from typing import Optional
@@ -17,6 +18,7 @@ from langgraph.graph.message import add_message
 load_dotenv()
 
 API_KEY=os.getenv("GROQ_API_KEY")
+
 llm_model=ChatGroq(model="llama-3.3-70b-versatile" , api_key=API_KEY)
 
 weather_endpoint_url="https://api.openweathermap.org/data/4.0/onecall/timeline/15min"
@@ -41,7 +43,9 @@ def get_weather_conditions(city_name :str , state_code: str , country_code : str
 
     """You are supposed to decode the geocode of the name of the city provided to you 
       using geocoding endpoint and then fetch the details of the weather data using the 
-      weather endpoint provided to you"""
+      weather endpoint provided to you
+      
+      Arguments : city_name , state_code , country_code"""
     
     params1={
         "q" : f'{city_name},{state_code},{country_code}',
@@ -80,7 +84,10 @@ def get_traffic_data(city_name: str, state_code: str, country_code: str):
 
     """You are supposed to decode the geocode of a city using the geocode endpoint (determint the latitude and the longitude )
        and then generate the necessary information related to traffic data and return the necessary parameters as they have
-       been specified below at the end of the function"""
+       been specified below at the end of the function
+       
+       Arguments : city_name , state_code , country_code
+       """
     
     params1 = {
         "q": f"{city_name},{state_code},{country_code}",
@@ -123,7 +130,9 @@ def get_traffic_data(city_name: str, state_code: str, country_code: str):
 def get_event_details( city: str,  start_date: Optional[str] = None, end_date: Optional[str] = None): 	
 
     """You are supposed to find all the information related to the ongoing events in the city which has been passed as a parameter . 
-       The user might additionally also enter the start date and the end date"""
+       The user might additionally also enter the start date and the end date
+       
+       Arguments = city """
     
     params = {
         "apikey": event_api_key,
@@ -146,4 +155,41 @@ def get_event_details( city: str,  start_date: Optional[str] = None, end_date: O
 
     return event_data_json["_embedded"]["events"]
 
+tool_list=[get_traffic_data,get_weather_conditions ,get_event_details]
 
+class AgentState(TypedDict):
+    messages :Annoted[Sequence[BaseMessage] , add_message]
+
+
+#NODE
+def main_agent(state:AgentState) ->AgentState :
+    system_prompt=SystemMessage(content="""
+    You are my AI agent whoes is responsible for predicting the traffic conditions of a city based various factors losted below :
+    - Traffic conditions of the city (use the get_traffic_data tool for the same)
+    - The weather conditions of the city which might affect the travelling of vehicles (use the get_weather_conditions tool for the same)
+    - The recent events going in the city which may lead to crowding and hinder vehicle movement (user the get_event_details) tool for the same
+""")
+    
+    if not state["messages"] :
+        user_input = "I am here to assist you determine the traffic conditions of the city you wish to"
+        user_message =HumanMessage(user_input.content)
+    else :
+        user_input ="How would you like to get the traffic data"
+        user_message=HumanMessage(user_input.content)
+    
+    to_pass= [system_prompt] + [user_message] +[state["messages"]]
+    response = llm_model.invoke(to_pass)
+    return response
+
+#ROUTER
+def shall_continue(state:AgentState)->AgentState:
+    #the decider code
+    last_message=state["messages"][-1]
+    if not last_message.tool_calls :
+       return "end"
+      #terminate
+    else : 
+       return "continue"
+    #go on with the loop
+     
+    
